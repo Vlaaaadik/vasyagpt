@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>ВасяGPT — ИИ-помощник</title>
   <meta name="description" content="Веб-интерфейс VasyaGPT: чат с Gemini, Vision, LaTeX, подсветка кода и генерация изображений." />
+  <link rel="icon" type="image/png" href="avatar.png" />
+  <link rel="apple-touch-icon" href="avatar.png" />
 
   <!-- Highlight.js (тёмная и светлая темы) -->
   <link id="hljs-theme-dark" rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
@@ -25,7 +27,7 @@
     <aside id="sidebar" class="sidebar" aria-label="История чатов">
       <div class="sidebar-header">
         <div class="brand">
-          <span class="brand-logo" aria-hidden="true">✦</span>
+          <img src="avatar.png" alt="ВасяGPT" class="vasya-avatar" />
           <span class="brand-name">ВасяGPT</span>
         </div>
         <button id="sidebar-close-btn" class="icon-btn mobile-only" type="button" title="Закрыть панель" aria-label="Закрыть панель">
@@ -81,7 +83,10 @@
       <section id="chat-messages" class="chat-messages" aria-live="polite">
         <!-- Приветственный экран (скрывается при появлении сообщений) -->
         <div id="welcome-screen" class="welcome-screen">
-          <div class="welcome-badge">✦ ВасяGPT</div>
+          <div class="welcome-badge">
+            <img src="avatar.png" alt="ВасяGPT" class="vasya-avatar" />
+            <span>ВасяGPT</span>
+          </div>
           <h2 class="welcome-heading">Чем помочь сегодня?</h2>
           <p class="welcome-sub">Умный помощник Вася: код с подсветкой, формулы LaTeX, анализ изображений и генерация картинок.</p>
 

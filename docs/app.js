@@ -329,16 +329,26 @@ const API_BASE_URL = "https://vasya-bot.vbeskerov.workers.dev"; // Замени�
     scrollToBottom();
   }
 
+  function createAssistantAvatar() {
+    const avatar = document.createElement("div");
+    avatar.className = "assistant-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+
+    const img = document.createElement("img");
+    img.src = "avatar.png";
+    img.alt = "ВасяGPT";
+    img.className = "vasya-avatar";
+
+    avatar.appendChild(img);
+    return avatar;
+  }
+
   function buildMessageElement(msg) {
     const row = document.createElement("div");
     row.className = `message-row ${msg.role}`;
 
     if (msg.role === "assistant") {
-      const avatar = document.createElement("div");
-      avatar.className = "assistant-avatar";
-      avatar.setAttribute("aria-hidden", "true");
-      avatar.textContent = "✦";
-      row.appendChild(avatar);
+      row.appendChild(createAssistantAvatar());
     }
 
     const bubble = document.createElement("div");
@@ -646,17 +656,40 @@ const API_BASE_URL = "https://vasya-bot.vbeskerov.workers.dev"; // Замени�
     attachBtn.disabled = isGenerating || isImageMode;
   }
 
-  function scrollToBottom() {
-    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  function isNearBottom() {
+    return chatMessagesEl.scrollHeight - chatMessagesEl.scrollTop - chatMessagesEl.clientHeight < 140;
+  }
+
+  function scrollToBottom(instant = false) {
+    if (instant) {
+      chatMessagesEl.scrollTo({ top: chatMessagesEl.scrollHeight, behavior: "auto" });
+    } else {
+      chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    }
+  }
+
+  function appendStreamingCursor(container) {
+    const cursor = document.createElement("span");
+    cursor.className = "streaming-cursor";
+    cursor.setAttribute("aria-hidden", "true");
+
+    let target = container;
+    const lastEl = container.lastElementChild;
+    if (lastEl) {
+      if (/^(P|H[1-6]|BLOCKQUOTE)$/.test(lastEl.tagName)) {
+        target = lastEl;
+      } else if ((lastEl.tagName === "UL" || lastEl.tagName === "OL") && lastEl.lastElementChild) {
+        target = lastEl.lastElementChild;
+      }
+    }
+    target.appendChild(cursor);
   }
 
   function showLoadingIndicator(labelText) {
     const row = document.createElement("div");
     row.className = "message-row assistant loading-row";
 
-    const avatar = document.createElement("div");
-    avatar.className = "assistant-avatar";
-    avatar.textContent = "✦";
+    const avatar = createAssistantAvatar();
 
     const bubble = document.createElement("div");
     bubble.className = "message-bubble";
@@ -743,6 +776,48 @@ const API_BASE_URL = "https://vasya-bot.vbeskerov.workers.dev"; // Замени�
       shouldGenerateImage ? "Генерация изображения..." : "Вася печатает..."
     );
 
+    let streamingRow = null;
+    let streamingContentEl = null;
+    let accumulatedText = "";
+    let renderRafId = null;
+
+    const cancelScheduledRender = () => {
+      if (renderRafId !== null) {
+        cancelAnimationFrame(renderRafId);
+        renderRafId = null;
+      }
+    };
+
+    const ensureStreamingBubble = () => {
+      if (streamingRow) return;
+      loadingRow.remove();
+      streamingRow = buildMessageElement({ role: "assistant", text: "" });
+      streamingContentEl = streamingRow.querySelector(".markdown-body");
+      if (activeChatId === chat.id) {
+        chatMessagesEl.appendChild(streamingRow);
+      }
+    };
+
+    const renderStreamingFrame = (withCursor) => {
+      if (!streamingContentEl) return;
+      const shouldScroll = isNearBottom();
+      renderSafeMarkdownAndMath(streamingContentEl, accumulatedText);
+      if (withCursor) {
+        appendStreamingCursor(streamingContentEl);
+      }
+      if (shouldScroll && activeChatId === chat.id) {
+        scrollToBottom(true);
+      }
+    };
+
+    const scheduleStreamingRender = () => {
+      if (renderRafId !== null) return;
+      renderRafId = requestAnimationFrame(() => {
+        renderRafId = null;
+        renderStreamingFrame(true);
+      });
+    };
+
     try {
       if (API_BASE_URL.includes("ВАШ-ВОРКЕР")) {
         throw new Error(
@@ -774,9 +849,11 @@ const API_BASE_URL = "https://vasya-bot.vbeskerov.workers.dev"; // Замени�
         loadingRow.remove();
         chat.messages.push(assistantMsg);
         chat.updatedAt = Date.now();
-        chatMessagesEl.appendChild(buildMessageElement(assistantMsg));
+        if (activeChatId === chat.id) {
+          chatMessagesEl.appendChild(buildMessageElement(assistantMsg));
+          scrollToBottom();
+        }
         saveChats();
-        scrollToBottom();
       } else {
         const resp = await fetch(`${API_BASE_URL}/api/chat`, {
           method: "POST",
@@ -786,42 +863,155 @@ const API_BASE_URL = "https://vasya-bot.vbeskerov.workers.dev"; // Замени�
             message: rawText,
             imageBase64: attachment ? attachment.base64 : undefined,
             imageMimeType: attachment ? attachment.mimeType : undefined,
-            thinkingLevel
+            thinkingLevel,
+            stream: true
           }),
           signal: currentAbortController.signal
         });
 
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || typeof data.reply !== "string") {
-          throw new Error(data.error || `Ошибка сервера (${resp.status})`);
+        const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+
+        if (!resp.ok) {
+          const errData = contentType.includes("application/json")
+            ? await resp.json().catch(() => ({}))
+            : {};
+          throw new Error(errData.error || `Ошибка сервера (${resp.status})`);
+        }
+
+        // Фолбэк на обычный JSON-ответ, если сервер вернул не SSE
+        if (contentType.includes("application/json") || !resp.body) {
+          const data = await resp.json().catch(() => ({}));
+          if (typeof data.reply !== "string") {
+            throw new Error(data.error || `Ошибка сервера (${resp.status})`);
+          }
+          accumulatedText = data.reply;
+        } else {
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          let sseBuffer = "";
+          let streamDone = false;
+
+          const processSseLine = (line) => {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) return;
+
+            const payloadStr = trimmed.slice(5).trim();
+            if (!payloadStr || payloadStr === "[DONE]") {
+              streamDone = true;
+              return;
+            }
+
+            let parsed;
+            try {
+              parsed = JSON.parse(payloadStr);
+            } catch {
+              return;
+            }
+
+            if (parsed.error) {
+              throw new Error(parsed.error);
+            }
+
+            if (typeof parsed.text === "string" && parsed.text.length > 0) {
+              ensureStreamingBubble();
+              accumulatedText += parsed.text;
+              scheduleStreamingRender();
+            }
+
+            if (parsed.done) {
+              streamDone = true;
+            }
+          };
+
+          while (!streamDone) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            sseBuffer += decoder.decode(value, { stream: true });
+            const lines = sseBuffer.split(/\r?\n/);
+            sseBuffer = lines.pop() || "";
+
+            for (const line of lines) {
+              processSseLine(line);
+              if (streamDone) break;
+            }
+          }
+
+          sseBuffer += decoder.decode();
+          if (!streamDone && sseBuffer.trim()) {
+            for (const line of sseBuffer.split(/\r?\n/)) {
+              processSseLine(line);
+            }
+          }
+        }
+
+        cancelScheduledRender();
+        const finalText = accumulatedText || "Пустой ответ от нейросети.";
+
+        if (streamingContentEl) {
+          renderStreamingFrame(false);
+        } else {
+          loadingRow.remove();
+          if (activeChatId === chat.id) {
+            chatMessagesEl.appendChild(
+              buildMessageElement({ role: "assistant", text: finalText })
+            );
+          }
         }
 
         const assistantMsg = {
           role: "assistant",
-          text: data.reply,
+          text: finalText,
           timestamp: Date.now()
         };
-
-        loadingRow.remove();
         chat.messages.push(assistantMsg);
         chat.updatedAt = Date.now();
-        chatMessagesEl.appendChild(buildMessageElement(assistantMsg));
         saveChats();
-        scrollToBottom();
+        if (activeChatId === chat.id && isNearBottom()) {
+          scrollToBottom();
+        }
       }
     } catch (err) {
+      cancelScheduledRender();
       loadingRow.remove();
 
       if (err && err.name === "AbortError") {
-        const stoppedMsg = {
-          role: "assistant",
-          text: "_Генерация остановлена пользователем._",
-          timestamp: Date.now()
-        };
-        chat.messages.push(stoppedMsg);
-        chatMessagesEl.appendChild(buildMessageElement(stoppedMsg));
-        saveChats();
+        if (accumulatedText && streamingContentEl) {
+          const stoppedText = accumulatedText + "\n\n_Генерация остановлена пользователем._";
+          renderSafeMarkdownAndMath(streamingContentEl, stoppedText);
+          const partialMsg = {
+            role: "assistant",
+            text: stoppedText,
+            timestamp: Date.now()
+          };
+          chat.messages.push(partialMsg);
+          chat.updatedAt = Date.now();
+          saveChats();
+        } else {
+          const stoppedMsg = {
+            role: "assistant",
+            text: "_Генерация остановлена пользователем._",
+            timestamp: Date.now()
+          };
+          chat.messages.push(stoppedMsg);
+          chat.updatedAt = Date.now();
+          if (activeChatId === chat.id) {
+            chatMessagesEl.appendChild(buildMessageElement(stoppedMsg));
+          }
+          saveChats();
+        }
       } else {
+        if (streamingRow && !accumulatedText) {
+          streamingRow.remove();
+        } else if (streamingContentEl && accumulatedText) {
+          renderSafeMarkdownAndMath(streamingContentEl, accumulatedText);
+          chat.messages.push({
+            role: "assistant",
+            text: accumulatedText,
+            timestamp: Date.now()
+          });
+        }
+
         const errorMsg = {
           role: "assistant",
           text: `Ошибка: ${err?.message || "Не удалось получить ответ от сервера."}`,
@@ -829,11 +1019,17 @@ const API_BASE_URL = "https://vasya-bot.vbeskerov.workers.dev"; // Замени�
           timestamp: Date.now()
         };
         chat.messages.push(errorMsg);
-        chatMessagesEl.appendChild(buildMessageElement(errorMsg));
+        chat.updatedAt = Date.now();
+        if (activeChatId === chat.id) {
+          chatMessagesEl.appendChild(buildMessageElement(errorMsg));
+        }
         saveChats();
       }
-      scrollToBottom();
+      if (activeChatId === chat.id) {
+        scrollToBottom();
+      }
     } finally {
+      cancelScheduledRender();
       currentAbortController = null;
       isGenerating = false;
       updateComposerUI();
